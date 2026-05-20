@@ -113,7 +113,9 @@ def fit_class(class_name, *, data_root, checkpoint_dir, epochs=EPOCHS,
               val_ratio=VAL_RATIO, device=DEVICE, visualize=False,
               fg_mask_dir=None, real_anomaly_frac=REAL_ANOMALY_FRAC,
               synthetic_anomaly_frac=SYNTHETIC_ANOMALY_FRAC,
-              early_stop_metric="pixel_ap"):
+              early_stop_metric="pixel_ap",
+              bce_pos_weight=BCE_POS_WEIGHT, bce_weight=BCE_WEIGHT,
+              dice_weight=DICE_WEIGHT):
     """Train a U-Net for a single object class and save the best checkpoint.
 
     When *fg_mask_dir* is provided, a patch bank is extracted from the real
@@ -173,7 +175,8 @@ def fit_class(class_name, *, data_root, checkpoint_dir, epochs=EPOCHS,
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr,
                                   weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
-    criterion = SegLoss().to(device)
+    criterion = SegLoss(bce_pos_weight=bce_pos_weight, bce_w=bce_weight,
+                        dice_w=dice_weight).to(device)
 
     history = []
     best_score = -1.0
@@ -252,6 +255,15 @@ def parse_args():
                    help="Validation metric used for early stopping / "
                         "checkpoint selection (default: pixel_ap). "
                         "Options: pixel_ap (= AUPRC), pixel_auroc.")
+    p.add_argument("--bce-pos-weight", type=float, default=BCE_POS_WEIGHT,
+                   help="Positive-class weight for BCEWithLogitsLoss "
+                        f"(default: {BCE_POS_WEIGHT}).")
+    p.add_argument("--bce-weight", type=float, default=BCE_WEIGHT,
+                   help="Weight of the BCE term in the combined loss "
+                        f"(default: {BCE_WEIGHT}).")
+    p.add_argument("--dice-weight", type=float, default=DICE_WEIGHT,
+                   help="Weight of the Dice term in the combined loss "
+                        f"(default: {DICE_WEIGHT}).")
     return p.parse_args()
 
 
@@ -304,6 +316,9 @@ def main():
             real_anomaly_frac=args.real_anomaly_frac,
             synthetic_anomaly_frac=args.synthetic_anomaly_frac,
             early_stop_metric=args.early_stop_metric,
+            bce_pos_weight=args.bce_pos_weight,
+            bce_weight=args.bce_weight,
+            dice_weight=args.dice_weight,
         )
 
     print("\nTraining complete.")
