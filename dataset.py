@@ -325,7 +325,7 @@ def build_loaders(splits, batch_size=BATCH_SIZE, image_size=IMAGE_SIZE,
     train_samples = splits["train_normals"] + splits["train_anomalies"]
     val_samples = splits["val_normals"] + splits["val_anomalies"]
 
-    use_synthetic = bool(patch_bank) and fg_mask_dir is not None
+    use_synthetic = bool(patch_bank) and fg_mask_dir is not None and synthetic_anomaly_frac > 0
     if use_synthetic:
         normal_frac = 1.0 - real_anomaly_frac
         synthetic_prob = synthetic_anomaly_frac / normal_frac if normal_frac > 0 else 0.0
