@@ -275,3 +275,76 @@ def show_class_predictions(class_name, model, splits, image_size=IMAGE_SIZE,
         axes[r, 3].set_title("overlay")
     plt.tight_layout()
     plt.show()
+
+
+# ── Save validation predictions to disk ─────────────────────────────────────
+
+def _save_single_grid(item, amap, out_path):
+    """Save a 3-panel grid (image | GT mask | predicted mask) to *out_path*.
+
+    Both masks use a fixed ``jet`` colourmap with ``vmin=0, vmax=1`` so the
+    colour scale is globally consistent across all saved images.
+    """
+    from pathlib import Path
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+
+    img = to_numpy_image(item["image_raw"])
+    mask = to_numpy_mask(item["mask"])
+
+    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+
+    axes[0].imshow(img)
+    axes[0].set_title("Image")
+    axes[0].axis("off")
+
+    axes[1].imshow(mask, cmap="jet", vmin=0, vmax=1)
+    axes[1].set_title("GT mask")
+    axes[1].axis("off")
+
+    im = axes[2].imshow(amap, cmap="jet", vmin=0, vmax=1)
+    axes[2].set_title("Predicted mask")
+    axes[2].axis("off")
+    plt.colorbar(im, ax=axes[2], fraction=0.046, pad=0.04)
+
+    plt.tight_layout()
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def save_val_predictions(class_name, model, splits, output_dir,
+                         image_size=IMAGE_SIZE, device=DEVICE):
+    """Save a grid image for every validation sample to disk.
+
+    Normal and anomalous samples are stored separately:
+        ``<output_dir>/segmentation/<class>/normal/``
+        ``<output_dir>/segmentation/<class>/anomalous/``
+    """
+    from pathlib import Path
+
+    base = Path(output_dir) / "segmentation" / class_name
+    normal_dir = base / "normal"
+    anomalous_dir = base / "anomalous"
+    normal_dir.mkdir(parents=True, exist_ok=True)
+    anomalous_dir.mkdir(parents=True, exist_ok=True)
+
+    val_norm = splits["val_normals"]
+    val_anom = splits["val_anomalies"]
+
+    if not val_norm and not val_anom:
+        print(f"[{class_name}] no validation images to save.")
+        return
+
+    for tag, samples, folder in [("normal", val_norm, normal_dir),
+                                  ("anomalous", val_anom, anomalous_dir)]:
+        if not samples:
+            continue
+        ds = SegAnomalyDataset(samples, image_size, train=False)
+        for i in range(len(ds)):
+            item = ds[i]
+            amap = predict_anomaly_map(model, item["image"], device=device)
+            stem = Path(item["path"]).stem
+            out_path = folder / f"{stem}.png"
+            _save_single_grid(item, amap, out_path)
+
+    total = len(val_norm) + len(val_anom)
+    print(f"[{class_name}] saved {total} validation grids to {base}")

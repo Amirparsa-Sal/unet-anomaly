@@ -45,7 +45,14 @@ from config import (
 )
 from dataset import build_class_splits, build_loaders, discover_classes
 from model import SegLoss, build_model
-from utils import safe_pixel_ap, safe_pixel_auroc, seed_everything, show_class_predictions, show_train_samples
+from utils import (
+    safe_pixel_ap,
+    safe_pixel_auroc,
+    save_val_predictions,
+    seed_everything,
+    show_class_predictions,
+    show_train_samples,
+)
 
 
 # ── Training & evaluation loops ─────────────────────────────────────────────
@@ -107,10 +114,11 @@ def evaluate(model, loader, device=DEVICE):
 
 # ── Per-class training ──────────────────────────────────────────────────────
 
-def fit_class(class_name, *, data_root, checkpoint_dir, epochs=EPOCHS,
-              lr=LR, weight_decay=WEIGHT_DECAY, batch_size=BATCH_SIZE,
-              image_size=IMAGE_SIZE, max_normals=MAX_NORMALS_PER_CLASS,
-              val_ratio=VAL_RATIO, device=DEVICE, visualize=False,
+def fit_class(class_name, *, data_root, checkpoint_dir, output_dir,
+              epochs=EPOCHS, lr=LR, weight_decay=WEIGHT_DECAY,
+              batch_size=BATCH_SIZE, image_size=IMAGE_SIZE,
+              max_normals=MAX_NORMALS_PER_CLASS, val_ratio=VAL_RATIO,
+              device=DEVICE, visualize=False,
               fg_mask_dir=None, real_anomaly_frac=REAL_ANOMALY_FRAC,
               synthetic_anomaly_frac=SYNTHETIC_ANOMALY_FRAC,
               early_stop_metric="pixel_ap",
@@ -211,6 +219,9 @@ def fit_class(class_name, *, data_root, checkpoint_dir, epochs=EPOCHS,
         show_class_predictions(class_name, model, splits,
                                image_size=image_size, device=device)
 
+    save_val_predictions(class_name, model, splits, output_dir,
+                         image_size=image_size, device=device)
+
     return model, splits, history
 
 
@@ -303,6 +314,7 @@ def main():
             cls,
             data_root=data_root,
             checkpoint_dir=checkpoint_dir,
+            output_dir=output_dir,
             epochs=args.epochs,
             lr=args.lr,
             weight_decay=args.weight_decay,
