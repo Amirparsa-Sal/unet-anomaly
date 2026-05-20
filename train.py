@@ -45,7 +45,7 @@ from config import (
 )
 from dataset import build_class_splits, build_loaders, discover_classes
 from model import SegLoss, build_model
-from utils import safe_pixel_ap, seed_everything, show_class_predictions, show_train_samples
+from utils import safe_pixel_ap, safe_pixel_auroc, seed_everything, show_class_predictions, show_train_samples
 
 
 # ── Training & evaluation loops ─────────────────────────────────────────────
@@ -76,11 +76,19 @@ def train_one_epoch(model, loader, criterion, optimizer, device=DEVICE):
     return total / max(1, n)
 
 
+VALID_METRICS = ("pixel_ap", "pixel_auroc")
+
+
 @torch.no_grad()
 def evaluate(model, loader, device=DEVICE):
-    """Return validation pixel AP over all pixels of all val images."""
+    """Return a dict of validation metrics over all val pixels.
+
+    Keys: ``pixel_ap`` (= AUPRC) and ``pixel_auroc``.
+    Values are ``float('nan')`` when the val set has only one class.
+    """
+    nan_result = {m: float("nan") for m in VALID_METRICS}
     if len(loader.dataset) == 0:
-        return float("nan")
+        return nan_result
     model.eval()
     all_y, all_s = [], []
     for batch in loader:
@@ -91,7 +99,10 @@ def evaluate(model, loader, device=DEVICE):
         all_s.append(prob.reshape(-1))
     y = np.concatenate(all_y)
     s = np.concatenate(all_s)
-    return safe_pixel_ap(y, s)
+    return {
+        "pixel_ap": safe_pixel_ap(y, s),
+        "pixel_auroc": safe_pixel_auroc(y, s),
+    }
 
 
 # ── Per-class training ──────────────────────────────────────────────────────
@@ -101,16 +112,23 @@ def fit_class(class_name, *, data_root, checkpoint_dir, epochs=EPOCHS,
               image_size=IMAGE_SIZE, max_normals=MAX_NORMALS_PER_CLASS,
               val_ratio=VAL_RATIO, device=DEVICE, visualize=False,
               fg_mask_dir=None, real_anomaly_frac=REAL_ANOMALY_FRAC,
-              synthetic_anomaly_frac=SYNTHETIC_ANOMALY_FRAC):
+              synthetic_anomaly_frac=SYNTHETIC_ANOMALY_FRAC,
+              early_stop_metric="pixel_ap"):
     """Train a U-Net for a single object class and save the best checkpoint.
 
     When *fg_mask_dir* is provided, a patch bank is extracted from the real
     anomalies and used to synthesise additional training examples on top of
     normal images.
 
+    *early_stop_metric* selects which validation metric drives checkpoint
+    selection.  Must be one of ``VALID_METRICS`` (``pixel_ap``, ``pixel_auroc``).
+
     Returns (model, splits, history_list) or (None, None, None) when no
     training data is available.
     """
+    assert early_stop_metric in VALID_METRICS, (
+        f"Unknown metric '{early_stop_metric}', choose from {VALID_METRICS}"
+    )
     seed_everything(SEED)
     splits = build_class_splits(class_name, root=data_root,
                                 max_normals=max_normals, val_ratio=val_ratio)
@@ -158,27 +176,33 @@ def fit_class(class_name, *, data_root, checkpoint_dir, epochs=EPOCHS,
     criterion = SegLoss().to(device)
 
     history = []
-    best_ap = -1.0
+    best_score = -1.0
     ckpt_path = Path(checkpoint_dir) / f"{class_name}.pt"
+    print(f"[{class_name}] early-stop metric: {early_stop_metric}")
 
     for epoch in range(1, epochs + 1):
         train_loss = train_one_epoch(model, train_loader, criterion, optimizer,
                                      device=device)
         scheduler.step()
-        val_ap = evaluate(model, val_loader, device=device)
-        history.append({"epoch": epoch, "train_loss": train_loss,
-                        "val_pixel_ap": val_ap})
-        print(f"  epoch {epoch:02d} | train_loss={train_loss:.4f} "
-              f"| val_pixel_ap={val_ap:.4f}")
-        if not math.isnan(val_ap) and val_ap > best_ap:
-            best_ap = val_ap
+        metrics = evaluate(model, val_loader, device=device)
+        record = {"epoch": epoch, "train_loss": train_loss}
+        record.update(metrics)
+        history.append(record)
+
+        parts = " | ".join(f"{k}={v:.4f}" for k, v in metrics.items())
+        print(f"  epoch {epoch:02d} | train_loss={train_loss:.4f} | {parts}")
+
+        score = metrics[early_stop_metric]
+        if not math.isnan(score) and score > best_score:
+            best_score = score
             torch.save(model.state_dict(), ckpt_path)
 
-    if best_ap < 0:
+    if best_score < 0:
         torch.save(model.state_dict(), ckpt_path)
     else:
         model.load_state_dict(torch.load(ckpt_path, map_location=device))
-    print(f"[{class_name}] best val pixel AP = {best_ap:.4f} -> {ckpt_path}")
+    print(f"[{class_name}] best val {early_stop_metric} = {best_score:.4f} "
+          f"-> {ckpt_path}")
 
     if visualize:
         show_class_predictions(class_name, model, splits,
@@ -223,6 +247,11 @@ def parse_args():
                    default=SYNTHETIC_ANOMALY_FRAC,
                    help="Target fraction of synthetic anomaly samples per "
                         f"batch (default: {SYNTHETIC_ANOMALY_FRAC}).")
+    p.add_argument("--early-stop-metric", type=str, default="pixel_ap",
+                   choices=VALID_METRICS,
+                   help="Validation metric used for early stopping / "
+                        "checkpoint selection (default: pixel_ap). "
+                        "Options: pixel_ap (= AUPRC), pixel_auroc.")
     return p.parse_args()
 
 
@@ -274,6 +303,7 @@ def main():
             fg_mask_dir=fg_mask_dir,
             real_anomaly_frac=args.real_anomaly_frac,
             synthetic_anomaly_frac=args.synthetic_anomaly_frac,
+            early_stop_metric=args.early_stop_metric,
         )
 
     print("\nTraining complete.")

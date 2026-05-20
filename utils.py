@@ -9,7 +9,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
-from sklearn.metrics import average_precision_score
+from sklearn.metrics import average_precision_score, roc_auc_score
 
 from config import (
     DEVICE,
@@ -38,12 +38,21 @@ def seed_everything(seed=SEED):
 # ── Metrics ──────────────────────────────────────────────────────────────────
 
 def safe_pixel_ap(y_true, scores):
-    """Pixel-level Average Precision; returns NaN when only one class is present."""
+    """Pixel-level Average Precision (= AUPRC); returns NaN when only one class is present."""
     y_true = np.asarray(y_true)
     scores = np.asarray(scores)
     if np.unique(y_true).size < 2:
         return float("nan")
     return float(average_precision_score(y_true.reshape(-1), scores.reshape(-1)))
+
+
+def safe_pixel_auroc(y_true, scores):
+    """Pixel-level AUROC; returns NaN when only one class is present."""
+    y_true = np.asarray(y_true)
+    scores = np.asarray(scores)
+    if np.unique(y_true).size < 2:
+        return float("nan")
+    return float(roc_auc_score(y_true.reshape(-1), scores.reshape(-1)))
 
 
 # ── q8rle encoding (from the project brief) ─────────────────────────────────
