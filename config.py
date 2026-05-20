@@ -35,6 +35,12 @@ MAX_NORMALS_PER_CLASS = 800
 # Target fraction of anomaly pixels per batch (via WeightedRandomSampler).
 ANOMALY_BATCH_FRACTION = 0.5
 
+# ── Synthetic anomaly generation ─────────────────────────────────────────────
+# Fraction of each batch that should be *real* anomaly samples.
+REAL_ANOMALY_FRAC = 0.25
+# Fraction of each batch that should be normal images with *synthetic* patches.
+SYNTHETIC_ANOMALY_FRAC = 0.25
+
 # ── Loss ─────────────────────────────────────────────────────────────────────
 BCE_POS_WEIGHT = 50.0
 DICE_WEIGHT = 1.0

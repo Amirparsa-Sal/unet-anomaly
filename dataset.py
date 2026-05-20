@@ -24,7 +24,9 @@ from config import (
     MAX_NORMALS_PER_CLASS,
     NUM_WORKERS,
     PIN_MEMORY,
+    REAL_ANOMALY_FRAC,
     SEED,
+    SYNTHETIC_ANOMALY_FRAC,
     VAL_RATIO,
 )
 
@@ -151,12 +153,23 @@ def normalize_imagenet(x):
 # ── PyTorch Dataset ──────────────────────────────────────────────────────────
 
 class SegAnomalyDataset(Dataset):
-    """Image + binary anomaly mask for one object class."""
+    """Image + binary anomaly mask for one object class.
 
-    def __init__(self, samples, image_size=IMAGE_SIZE, train=False):
+    When *patch_bank*, *fg_mask_dir*, and *data_root* are provided and
+    ``synthetic_prob > 0``, normal samples have a chance of receiving a
+    synthetically pasted anomaly patch at each ``__getitem__`` call.
+    """
+
+    def __init__(self, samples, image_size=IMAGE_SIZE, train=False,
+                 patch_bank=None, fg_mask_dir=None, data_root=None,
+                 synthetic_prob=0.0):
         self.samples = list(samples)
         self.image_size = image_size
         self.train = train
+        self.patch_bank = patch_bank or []
+        self.fg_mask_dir = fg_mask_dir
+        self.data_root = data_root
+        self.synthetic_prob = synthetic_prob
 
     def __len__(self):
         return len(self.samples)
@@ -193,10 +206,48 @@ class SegAnomalyDataset(Dataset):
             img = Image.fromarray((arr * 255).astype(np.uint8))
         return img, mask
 
+    def _apply_synthetic(self, img, rec):
+        """Try to paste a synthetic anomaly patch onto a normal image.
+
+        Returns ``(img, mask, applied)`` where *applied* is True when a
+        patch was successfully pasted.
+        """
+        from synthetic import (
+            augment_patch,
+            load_fg_mask,
+            paste_synthetic_anomaly,
+            resolve_fg_mask_path,
+        )
+
+        if not self.patch_bank or self.fg_mask_dir is None or self.data_root is None:
+            return img, Image.new("L", (self.image_size, self.image_size), 0), False
+
+        fg_path = resolve_fg_mask_path(
+            rec["image_path"], self.data_root, self.fg_mask_dir,
+        )
+        if fg_path is None:
+            return img, Image.new("L", (self.image_size, self.image_size), 0), False
+
+        fg_mask_np = load_fg_mask(fg_path, self.image_size)
+        patch_img_np, patch_mask_np = random.choice(self.patch_bank)
+        patch_img, patch_mask = augment_patch(patch_img_np, patch_mask_np)
+        img, mask = paste_synthetic_anomaly(
+            img, fg_mask_np, patch_img, patch_mask, self.image_size,
+        )
+        return img, mask, True
+
     def __getitem__(self, idx):
         rec = self.samples[idx]
         img, mask = self._load(rec)
+
+        is_synthetic = False
         if self.train:
+            # Synthetic anomaly injection for normal samples.
+            if (rec["label"] == 0
+                    and self.patch_bank
+                    and random.random() < self.synthetic_prob):
+                img, mask, is_synthetic = self._apply_synthetic(img, rec)
+
             img, mask = self._augment(img, mask)
 
         img_t = pil_to_chw_float(img)
@@ -204,12 +255,15 @@ class SegAnomalyDataset(Dataset):
         mask_t = pil_to_chw_float(mask)
         mask_t = (mask_t > 0.5).float()
 
+        label = 1 if is_synthetic else rec["label"]
+        defect = "synthetic" if is_synthetic else rec["defect_type"]
+
         return {
             "image": img_n,
             "image_raw": img_t,
             "mask": mask_t,
-            "label": torch.tensor(rec["label"], dtype=torch.long),
-            "defect_type": rec["defect_type"],
+            "label": torch.tensor(label, dtype=torch.long),
+            "defect_type": defect,
             "path": str(rec["image_path"]),
         }
 
@@ -254,21 +308,45 @@ def build_class_splits(class_name, root, max_normals=MAX_NORMALS_PER_CLASS,
     }
 
 
-def build_loaders(splits, batch_size=BATCH_SIZE, image_size=IMAGE_SIZE):
+def build_loaders(splits, batch_size=BATCH_SIZE, image_size=IMAGE_SIZE,
+                  patch_bank=None, fg_mask_dir=None, data_root=None,
+                  real_anomaly_frac=REAL_ANOMALY_FRAC,
+                  synthetic_anomaly_frac=SYNTHETIC_ANOMALY_FRAC):
     """Build train and validation DataLoaders.
 
-    The training loader uses a WeightedRandomSampler to balance normals and
-    anomalies.  Validation uses sequential ordering.
+    Batch composition (when *patch_bank* is provided):
+        - ``real_anomaly_frac`` of the batch are real anomaly samples.
+        - ``synthetic_anomaly_frac`` are normal images with synthetic patches.
+        - The remainder are pure normal images.
+
+    When *patch_bank* is ``None`` or empty, falls back to the original
+    two-class weighting using ``ANOMALY_BATCH_FRACTION``.
     """
     train_samples = splits["train_normals"] + splits["train_anomalies"]
     val_samples = splits["val_normals"] + splits["val_anomalies"]
 
-    train_ds = SegAnomalyDataset(train_samples, image_size, train=True)
+    use_synthetic = bool(patch_bank) and fg_mask_dir is not None
+    if use_synthetic:
+        normal_frac = 1.0 - real_anomaly_frac
+        synthetic_prob = synthetic_anomaly_frac / normal_frac if normal_frac > 0 else 0.0
+    else:
+        synthetic_prob = 0.0
+
+    train_ds = SegAnomalyDataset(
+        train_samples, image_size, train=True,
+        patch_bank=patch_bank, fg_mask_dir=fg_mask_dir,
+        data_root=data_root, synthetic_prob=synthetic_prob,
+    )
     val_ds = SegAnomalyDataset(val_samples, image_size, train=False)
 
     n_norm = len(splits["train_normals"])
     n_anom = max(1, len(splits["train_anomalies"]))
-    p_anom = ANOMALY_BATCH_FRACTION
+
+    if use_synthetic:
+        p_anom = real_anomaly_frac
+    else:
+        p_anom = ANOMALY_BATCH_FRACTION
+
     weights = []
     for s in train_samples:
         if s["label"] == 1:
